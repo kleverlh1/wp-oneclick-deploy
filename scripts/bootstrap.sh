@@ -32,10 +32,28 @@ DB_NAME=$(echo "$DOMAIN_NAME" | tr '.' '_')
 DB_USER="wp_$(echo "$DOMAIN_NAME" | cut -d. -f1)"
 VH_NAME=$(echo "$DOMAIN_NAME" | tr '.' '-')
 OLS_USER="admin"
-OLS_PASS=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c22)
-DB_ROOT_PASS=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c22)
-DB_PASS=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c22)
-WP_PASS=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c22)
+
+# Credenciales persistentes: si ya corrimos el script antes en esta misma
+# instancia (por un reintento tras un error), reutilizamos las mismas
+# contraseñas en vez de generar unas nuevas que ya no coincidirían con lo
+# que MariaDB/OLS quedaron esperando.
+STATE_FILE="/root/.wp-bootstrap-secrets"
+if [ -f "$STATE_FILE" ]; then
+  echo "Se encontraron credenciales de un intento anterior, reutilizándolas."
+  source "$STATE_FILE"
+else
+  OLS_PASS=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c22)
+  DB_ROOT_PASS=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c22)
+  DB_PASS=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c22)
+  WP_PASS=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c22)
+  cat > "$STATE_FILE" <<EOF
+OLS_PASS='$OLS_PASS'
+DB_ROOT_PASS='$DB_ROOT_PASS'
+DB_PASS='$DB_PASS'
+WP_PASS='$WP_PASS'
+EOF
+  chmod 600 "$STATE_FILE"
+fi
 
 echo "== Paso 1/11: sistema =="
 apt update && apt upgrade -y
@@ -60,12 +78,24 @@ apt install -y mariadb-server mariadb-client
 systemctl enable mariadb
 systemctl start mariadb
 
-mysql -u root <<SQL
+# Detecta si root ya tiene contraseña puesta (de un intento anterior) o no.
+if mysql -u root -e "SELECT 1" >/dev/null 2>&1; then
+  MYSQL_ROOT=(mysql -u root)
+elif mysql -u root -p"$DB_ROOT_PASS" -e "SELECT 1" >/dev/null 2>&1; then
+  echo "root de MariaDB ya tenía la contraseña guardada puesta, continuando."
+  MYSQL_ROOT=(mysql -u root -p"$DB_ROOT_PASS")
+else
+  echo "ERROR: no se pudo conectar a MariaDB como root ni sin contraseña ni con la guardada en $STATE_FILE"
+  exit 1
+fi
+
+"${MYSQL_ROOT[@]}" <<SQL
 ALTER USER 'root'@'localhost' IDENTIFIED BY '$DB_ROOT_PASS';
 DELETE FROM mysql.user WHERE User='';
 DROP DATABASE IF EXISTS test;
-CREATE DATABASE $DB_NAME CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';
+CREATE DATABASE IF NOT EXISTS $DB_NAME CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';
+ALTER USER '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';
 GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';
 FLUSH PRIVILEGES;
 SQL
@@ -154,6 +184,7 @@ rewrite  {
 }
 VHCONF
 
+if ! grep -q "^virtualhost $VH_NAME {" /usr/local/lsws/conf/httpd_config.conf; then
 cat >> /usr/local/lsws/conf/httpd_config.conf <<MAINCONF
 
 virtualhost $VH_NAME {
@@ -164,12 +195,20 @@ virtualhost $VH_NAME {
   restrained              0
 }
 MAINCONF
+else
+  echo "El virtualhost $VH_NAME ya estaba registrado, no se duplica."
+fi
 
-# Mapea el vhost al listener HTTP "Default" que trae OLS de fábrica.
+# Mapea el vhost al listener HTTP "Default" que trae OLS de fábrica (solo si
+# no estaba mapeado ya, para poder reintentar el script sin duplicarlo).
 # NOTA: esta es la parte más frágil del script — asume que existe un bloque
 # `listener Default { ... }`. Si tu versión de OLS lo nombra distinto,
 # ajusta este sed o hazlo una vez a mano desde el panel :7080.
-sed -i "/^listener Default/,/^}/ s/^}/  map                     $VH_NAME $DOMAIN_NAME, www.$DOMAIN_NAME\n}/" /usr/local/lsws/conf/httpd_config.conf
+if ! grep -q "map .*$VH_NAME $DOMAIN_NAME" /usr/local/lsws/conf/httpd_config.conf; then
+  sed -i "/^listener Default/,/^}/ s/^}/  map                     $VH_NAME $DOMAIN_NAME, www.$DOMAIN_NAME\n}/" /usr/local/lsws/conf/httpd_config.conf
+else
+  echo "El mapeo del dominio ya existía, no se duplica."
+fi
 
 chown -R nobody:nogroup /usr/local/lsws/$VH_NAME/public_html
 systemctl restart lsws
@@ -181,10 +220,24 @@ mv wp-cli.phar /usr/local/bin/wp
 export WP_CLI_PHP=/usr/local/lsws/lsphp84/bin/lsphp
 
 cd /usr/local/lsws/$VH_NAME/public_html
-sudo -u nobody -E env WP_CLI_PHP=$WP_CLI_PHP wp core download
-sudo -u nobody -E env WP_CLI_PHP=$WP_CLI_PHP wp config create --dbname="$DB_NAME" --dbuser="$DB_USER" --dbpass="$DB_PASS" --dbhost=localhost
-sudo -u nobody -E env WP_CLI_PHP=$WP_CLI_PHP wp core install --url="https://$DOMAIN_NAME" --title="$DOMAIN_NAME" \
-  --admin_user="$WP_ADMIN_USER" --admin_password="$WP_PASS" --admin_email="$ADMIN_EMAIL" --skip-email
+if [ ! -f wp-load.php ]; then
+  sudo -u nobody -E env WP_CLI_PHP=$WP_CLI_PHP wp core download
+else
+  echo "WordPress ya estaba descargado, se omite."
+fi
+
+if [ ! -f wp-config.php ]; then
+  sudo -u nobody -E env WP_CLI_PHP=$WP_CLI_PHP wp config create --dbname="$DB_NAME" --dbuser="$DB_USER" --dbpass="$DB_PASS" --dbhost=localhost
+else
+  echo "wp-config.php ya existía, se omite."
+fi
+
+if sudo -u nobody -E env WP_CLI_PHP=$WP_CLI_PHP wp core is-installed 2>/dev/null; then
+  echo "WordPress ya estaba instalado, se omite core install."
+else
+  sudo -u nobody -E env WP_CLI_PHP=$WP_CLI_PHP wp core install --url="https://$DOMAIN_NAME" --title="$DOMAIN_NAME" \
+    --admin_user="$WP_ADMIN_USER" --admin_password="$WP_PASS" --admin_email="$ADMIN_EMAIL" --skip-email
+fi
 sudo -u nobody -E env WP_CLI_PHP=$WP_CLI_PHP wp plugin install litespeed-cache --activate
 
 echo "== Paso 8/11: firewall (ufw) =="
