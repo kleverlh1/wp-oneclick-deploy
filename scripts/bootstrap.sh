@@ -57,7 +57,7 @@ fi
 
 echo "== Paso 1/11: sistema =="
 apt update && apt upgrade -y
-apt install -y wget curl gnupg2 software-properties-common ufw unzip jq expect dnsutils php-cli
+apt install -y wget curl gnupg2 software-properties-common ufw unzip jq expect dnsutils php-cli php-mysql
 
 echo "== Instalando AWS CLI v2 (instalador oficial, no depende de apt) =="
 curl -s "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
@@ -217,28 +217,30 @@ echo "== Paso 7/11: WP-CLI + WordPress =="
 curl -sO https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
 chmod +x wp-cli.phar
 mv wp-cli.phar /usr/local/bin/wp-cli.phar
-LSPHP=/usr/local/lsws/lsphp84/bin/lsphp
+# WP-CLI exige SAPI 'cli' — lsphp84 se identifica como SAPI 'litespeed' y WP-CLI
+# lo rechaza, así que para WP-CLI usamos el php-cli del sistema (con php-mysql
+# instalado arriba). El sitio en sí sigue sirviéndose con lsphp84, sin cambios.
 
 cd /usr/local/lsws/$VH_NAME/public_html
 if [ ! -f wp-load.php ]; then
-  sudo -u nobody "$LSPHP" /usr/local/bin/wp-cli.phar core download
+  sudo -u nobody php /usr/local/bin/wp-cli.phar core download
 else
   echo "WordPress ya estaba descargado, se omite."
 fi
 
 if [ ! -f wp-config.php ]; then
-  sudo -u nobody "$LSPHP" /usr/local/bin/wp-cli.phar config create --dbname="$DB_NAME" --dbuser="$DB_USER" --dbpass="$DB_PASS" --dbhost=localhost
+  sudo -u nobody php /usr/local/bin/wp-cli.phar config create --dbname="$DB_NAME" --dbuser="$DB_USER" --dbpass="$DB_PASS" --dbhost=localhost
 else
   echo "wp-config.php ya existía, se omite."
 fi
 
-if sudo -u nobody "$LSPHP" /usr/local/bin/wp-cli.phar core is-installed 2>/dev/null; then
+if sudo -u nobody php /usr/local/bin/wp-cli.phar core is-installed 2>/dev/null; then
   echo "WordPress ya estaba instalado, se omite core install."
 else
-  sudo -u nobody "$LSPHP" /usr/local/bin/wp-cli.phar core install --url="https://$DOMAIN_NAME" --title="$DOMAIN_NAME" \
+  sudo -u nobody php /usr/local/bin/wp-cli.phar core install --url="https://$DOMAIN_NAME" --title="$DOMAIN_NAME" \
     --admin_user="$WP_ADMIN_USER" --admin_password="$WP_PASS" --admin_email="$ADMIN_EMAIL" --skip-email
 fi
-sudo -u nobody "$LSPHP" /usr/local/bin/wp-cli.phar plugin install litespeed-cache --activate
+sudo -u nobody php /usr/local/bin/wp-cli.phar plugin install litespeed-cache --activate
 
 echo "== Paso 8/11: firewall (ufw) =="
 ufw allow 22/tcp
