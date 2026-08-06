@@ -1,0 +1,158 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Despliegue de 1 clic: WordPress sobre OpenLiteSpeed + MariaDB + PHP 8.4 en
+  una instancia EC2 Ubuntu, con SSL automático (Let's Encrypt) y credenciales
+  guardadas en AWS Secrets Manager. El cliente solo necesita: cuenta de AWS,
+  un dominio, y (opcional) su zona alojada en Route 53 para el DNS automático.
+
+Parameters:
+  DomainName:
+    Type: String
+    Description: Dominio principal, sin http:// ni www (ej. tiendasplanet.com)
+    AllowedPattern: "^[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
+
+  AdminEmail:
+    Type: String
+    Description: Correo para el admin de WordPress y para el certificado SSL
+
+  WPAdminUser:
+    Type: String
+    Default: admin
+    Description: Usuario administrador de WordPress
+
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Par de llaves EC2 existente, para poder entrar por SSH si hace falta
+
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.micro, t3.small, t3.medium, t3.large]
+    Description: t3.micro alcanza para sitios chicos; t3.small es lo recomendado
+
+  SSHLocation:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: >
+      CIDR permitido para SSH (22) y el panel de OpenLiteSpeed (7080).
+      CAMBIA ESTO por tu IP real (ej. 200.1.2.3/32) antes de lanzar en producción.
+
+  HostedZoneId:
+    Type: String
+    Default: ""
+    Description: >
+      (Opcional) ID de la Hosted Zone en Route 53 de ese dominio, para que el
+      DNS se configure solo. Déjalo vacío si el cliente apuntará el DNS a mano.
+
+  BootstrapScriptUrl:
+    Type: String
+    Default: "https://raw.githubusercontent.com/kleverlh1/wp-oneclick-deploy/main/scripts/bootstrap.sh"
+    Description: URL raw del bootstrap.sh en GitHub (reemplaza TU_USUARIO/TU_REPO)
+
+  LatestUbuntuAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
+    Description: Se resuelve automáticamente a la última AMI de Ubuntu 24.04 LTS
+
+Resources:
+
+  WPSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "Acceso web para ${DomainName}"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SSHLocation
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 7080
+          ToPort: 7080
+          CidrIp: !Ref SSHLocation
+
+  WPInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: WPSecretsAndDNS
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:CreateSecret
+                  - secretsmanager:PutSecretValue
+                  - secretsmanager:TagResource
+                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:wp-oneclick-deploy/*"
+              - Effect: Allow
+                Action:
+                  - route53:ChangeResourceRecordSets
+                  - route53:GetHostedZone
+                Resource: !Sub "arn:aws:route53:::hostedzone/${HostedZoneId}"
+
+  WPInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref WPInstanceRole]
+
+  WPInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref LatestUbuntuAmiId
+      KeyName: !Ref KeyPairName
+      SecurityGroupIds: [!Ref WPSecurityGroup]
+      IamInstanceProfile: !Ref WPInstanceProfile
+      Tags:
+        - Key: Name
+          Value: !Sub "wp-${DomainName}"
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # Wrapper minimo: solo exporta variables y descarga/ejecuta bootstrap.sh
+          # La logica real vive en el repo de GitHub (una sola fuente de verdad).
+          export DOMAIN_NAME="${DomainName}"
+          export ADMIN_EMAIL="${AdminEmail}"
+          export WP_ADMIN_USER="${WPAdminUser}"
+          export HOSTED_ZONE_ID="${HostedZoneId}"
+          export AWS_REGION="${AWS::Region}"
+          curl -fsSL "${BootstrapScriptUrl}" -o /tmp/bootstrap.sh
+          chmod +x /tmp/bootstrap.sh
+          /tmp/bootstrap.sh
+
+  ElasticIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref WPInstance
+
+Outputs:
+  SiteURL:
+    Description: URL del sitio (el SSL puede tardar unos minutos tras el primer boot)
+    Value: !Sub "https://${DomainName}"
+  ElasticIPAddress:
+    Description: IP publica fija de la instancia — apunta aqui el DNS si no usaste Route 53 automatico
+    Value: !Ref ElasticIP
+  AdminPanelURL:
+    Description: Panel de OpenLiteSpeed
+    Value: !Sub "https://${ElasticIP}:7080"
+  SecretsManagerPath:
+    Description: Donde quedaron guardadas las credenciales generadas
+    Value: !Sub "wp-oneclick-deploy/${DomainName} (region ${AWS::Region})"
+  SSHCommand:
+    Description: Como entrar por SSH si necesitas revisar el log de instalacion
+    Value: !Sub "ssh -i tu-llave.pem ubuntu@${ElasticIP}  (log: /var/log/wp-bootstrap.log)"
