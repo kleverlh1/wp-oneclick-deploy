@@ -121,7 +121,7 @@ if [ -n "$EXT_DIR" ]; then
   fi
 fi
 echo "Módulos PHP activos ahora:"
-/usr/local/lsws/lsphp84/bin/lsphp -m | grep -iE "mysqli|pdo_mysql|curl|gd|mbstring|xml|zip|intl|imagick|opcache" || echo "AVISO: ninguna de las extensiones esperadas quedó activa, revisar a mano"
+/usr/local/lsws/lsphp84/bin/lsphp -i 2>/dev/null | grep -iE "^mysqli support|^pdo_mysql support|^curl support|^gd support|^mbstring support|^xml support|^zip |^intl support|^imagick module version|opcache.enable " || echo "AVISO: no se pudo confirmar por -i, revisar a mano con: lsphp -i | less"
 
 echo "== Paso 5/11: panel de administración OLS =="
 # NOTA: admpass.sh es interactivo por diseño. Lo automatizamos con `expect`.
