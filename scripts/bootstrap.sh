@@ -77,6 +77,22 @@ for ext in curl json zip gd mbstring xml intl imagick opcache; do
   apt install -y lsphp84-$ext || echo "AVISO: el paquete lsphp84-$ext no existe en el repo, se omite (posiblemente ya viene incluido en el paquete base)"
 done
 
+echo "== Activando extensiones PHP instaladas (los paquetes lsphp84 no las habilitan solos) =="
+PHP_INI="/usr/local/lsws/lsphp84/etc/php/8.4/litespeed/php.ini"
+EXT_DIR=$(find /usr/local/lsws/lsphp84/lib/php -maxdepth 1 -type d -name "2*" | head -1)
+if [ -n "$EXT_DIR" ]; then
+  for mod in mysqli pdo_mysql curl gd mbstring xml zip intl imagick; do
+    if [ -f "$EXT_DIR/${mod}.so" ] && ! grep -q "^extension=${mod}\.so" "$PHP_INI"; then
+      echo "extension=${mod}.so" >> "$PHP_INI"
+    fi
+  done
+  if [ -f "$EXT_DIR/opcache.so" ] && ! grep -qi "opcache.so" "$PHP_INI"; then
+    echo "zend_extension=opcache.so" >> "$PHP_INI"
+  fi
+fi
+echo "Módulos PHP activos ahora:"
+/usr/local/lsws/lsphp84/bin/lsphp -m | grep -iE "mysqli|pdo_mysql|curl|gd|mbstring|xml|zip|intl|imagick|opcache" || echo "AVISO: ninguna de las extensiones esperadas quedó activa, revisar a mano"
+
 echo "== Paso 5/11: panel de administración OLS =="
 # NOTA: admpass.sh es interactivo por diseño. Lo automatizamos con `expect`.
 # Si LiteSpeed cambia el texto de sus prompts esto puede fallar — si pasa,
