@@ -51,7 +51,7 @@ echo "== Paso 2/11: OpenLiteSpeed =="
 wget -O - https://repo.litespeed.sh | bash
 apt update
 apt install -y openlitespeed
-systemctl enable lsws
+systemctl enable lsws 2>/dev/null || systemctl enable lshttpd 2>/dev/null || echo "AVISO: no se pudo 'enable' OpenLiteSpeed para autoarranque (no crítico, se sigue iniciando/reiniciando bien con systemctl start|restart lsws). Revísalo luego con: systemctl status lsws"
 
 echo "== Paso 3/11: MariaDB 11.4 LTS =="
 curl -LsS https://downloads.mariadb.com/MariaDB/mariadb_repo_setup | bash -s -- --mariadb-server-version="mariadb-11.4"
