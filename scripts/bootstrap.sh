@@ -39,7 +39,13 @@ WP_PASS=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c22)
 
 echo "== Paso 1/11: sistema =="
 apt update && apt upgrade -y
-apt install -y wget curl gnupg2 software-properties-common ufw unzip jq expect dnsutils php-cli awscli
+apt install -y wget curl gnupg2 software-properties-common ufw unzip jq expect dnsutils php-cli
+
+echo "== Instalando AWS CLI v2 (instalador oficial, no depende de apt) =="
+curl -s "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+unzip -q -o /tmp/awscliv2.zip -d /tmp
+/tmp/aws/install --update
+aws --version
 
 echo "== Paso 2/11: OpenLiteSpeed =="
 wget -O - https://repo.litespeed.sh | bash
