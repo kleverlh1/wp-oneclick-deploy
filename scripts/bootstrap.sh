@@ -216,29 +216,29 @@ systemctl restart lsws
 echo "== Paso 7/11: WP-CLI + WordPress =="
 curl -sO https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
 chmod +x wp-cli.phar
-mv wp-cli.phar /usr/local/bin/wp
-export WP_CLI_PHP=/usr/local/lsws/lsphp84/bin/lsphp
+mv wp-cli.phar /usr/local/bin/wp-cli.phar
+LSPHP=/usr/local/lsws/lsphp84/bin/lsphp
 
 cd /usr/local/lsws/$VH_NAME/public_html
 if [ ! -f wp-load.php ]; then
-  sudo -u nobody -E env WP_CLI_PHP=$WP_CLI_PHP wp core download
+  sudo -u nobody "$LSPHP" /usr/local/bin/wp-cli.phar core download
 else
   echo "WordPress ya estaba descargado, se omite."
 fi
 
 if [ ! -f wp-config.php ]; then
-  sudo -u nobody -E env WP_CLI_PHP=$WP_CLI_PHP wp config create --dbname="$DB_NAME" --dbuser="$DB_USER" --dbpass="$DB_PASS" --dbhost=localhost
+  sudo -u nobody "$LSPHP" /usr/local/bin/wp-cli.phar config create --dbname="$DB_NAME" --dbuser="$DB_USER" --dbpass="$DB_PASS" --dbhost=localhost
 else
   echo "wp-config.php ya existía, se omite."
 fi
 
-if sudo -u nobody -E env WP_CLI_PHP=$WP_CLI_PHP wp core is-installed 2>/dev/null; then
+if sudo -u nobody "$LSPHP" /usr/local/bin/wp-cli.phar core is-installed 2>/dev/null; then
   echo "WordPress ya estaba instalado, se omite core install."
 else
-  sudo -u nobody -E env WP_CLI_PHP=$WP_CLI_PHP wp core install --url="https://$DOMAIN_NAME" --title="$DOMAIN_NAME" \
+  sudo -u nobody "$LSPHP" /usr/local/bin/wp-cli.phar core install --url="https://$DOMAIN_NAME" --title="$DOMAIN_NAME" \
     --admin_user="$WP_ADMIN_USER" --admin_password="$WP_PASS" --admin_email="$ADMIN_EMAIL" --skip-email
 fi
-sudo -u nobody -E env WP_CLI_PHP=$WP_CLI_PHP wp plugin install litespeed-cache --activate
+sudo -u nobody "$LSPHP" /usr/local/bin/wp-cli.phar plugin install litespeed-cache --activate
 
 echo "== Paso 8/11: firewall (ufw) =="
 ufw allow 22/tcp
