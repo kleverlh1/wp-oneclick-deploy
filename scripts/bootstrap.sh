@@ -71,9 +71,11 @@ FLUSH PRIVILEGES;
 SQL
 
 echo "== Paso 4/11: PHP 8.4 (LSPHP) =="
-apt install -y lsphp84 lsphp84-common lsphp84-mysql lsphp84-curl lsphp84-json \
-  lsphp84-zip lsphp84-gd lsphp84-mbstring lsphp84-xml lsphp84-intl \
-  lsphp84-imagick lsphp84-opcache
+apt install -y lsphp84 lsphp84-common lsphp84-mysql
+
+for ext in curl json zip gd mbstring xml intl imagick opcache; do
+  apt install -y lsphp84-$ext || echo "AVISO: el paquete lsphp84-$ext no existe en el repo, se omite (posiblemente ya viene incluido en el paquete base)"
+done
 
 echo "== Paso 5/11: panel de administración OLS =="
 # NOTA: admpass.sh es interactivo por diseño. Lo automatizamos con `expect`.
