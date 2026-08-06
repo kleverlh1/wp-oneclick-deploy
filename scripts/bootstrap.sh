@@ -123,6 +123,24 @@ fi
 echo "Módulos PHP activos ahora:"
 /usr/local/lsws/lsphp84/bin/lsphp -i 2>/dev/null | grep -iE "^mysqli support|^pdo_mysql support|^curl support|^gd support|^mbstring support|^xml support|^zip |^intl support|^imagick module version|opcache.enable " || echo "AVISO: no se pudo confirmar por -i, revisar a mano con: lsphp -i | less"
 
+echo "== Ajustando límites de PHP (memoria, subida de archivos, tiempos) =="
+set_php_ini() {
+  local key="$1" val="$2" ini="$3"
+  if grep -qE "^${key}[[:space:]]*=" "$ini"; then
+    sed -i -E "s/^${key}[[:space:]]*=.*/${key} = ${val}/" "$ini"
+  elif grep -qE "^;${key}[[:space:]]*=" "$ini"; then
+    sed -i -E "s/^;${key}[[:space:]]*=.*/${key} = ${val}/" "$ini"
+  else
+    echo "${key} = ${val}" >> "$ini"
+  fi
+}
+set_php_ini memory_limit 256M "$PHP_INI"
+set_php_ini upload_max_filesize 64M "$PHP_INI"
+set_php_ini post_max_size 64M "$PHP_INI"
+set_php_ini max_execution_time 300 "$PHP_INI"
+set_php_ini max_input_vars 3000 "$PHP_INI"
+set_php_ini max_input_time 300 "$PHP_INI"
+
 echo "== Paso 5/11: panel de administración OLS =="
 # NOTA: admpass.sh es interactivo por diseño. Lo automatizamos con `expect`.
 # Si LiteSpeed cambia el texto de sus prompts esto puede fallar — si pasa,
