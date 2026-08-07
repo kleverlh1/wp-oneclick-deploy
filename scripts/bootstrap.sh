@@ -10,6 +10,7 @@
 #   export WP_ADMIN_USER="admin"          # opcional, default "admin"
 #   export HOSTED_ZONE_ID=""              # opcional, ID de zona en Route 53
 #   export AWS_REGION="us-east-1"         # opcional
+#   export BACKUP_BUCKET=""               # opcional, bucket S3 de respaldos
 #   sudo -E bash bootstrap.sh
 # ============================================================================
 
@@ -22,6 +23,7 @@ echo "=== Bootstrap iniciado: $(date) ==="
 WP_ADMIN_USER="${WP_ADMIN_USER:-admin}"
 HOSTED_ZONE_ID="${HOSTED_ZONE_ID:-}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
+BACKUP_BUCKET="${BACKUP_BUCKET:-}"   # bucket S3 para respaldos; vacio = solo copia local
 
 # --- IP pública de la instancia vía metadata (IMDSv2) ---
 TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
@@ -55,7 +57,7 @@ EOF
   chmod 600 "$STATE_FILE"
 fi
 
-echo "== Paso 1/11: sistema =="
+echo "== Paso 1/13: sistema =="
 apt update && apt upgrade -y
 apt install -y wget curl gnupg2 software-properties-common ufw unzip jq expect dnsutils php-cli php8.3-mysql
 
@@ -65,13 +67,13 @@ unzip -q -o /tmp/awscliv2.zip -d /tmp
 /tmp/aws/install --update
 aws --version
 
-echo "== Paso 2/11: OpenLiteSpeed =="
+echo "== Paso 2/13: OpenLiteSpeed =="
 wget -O - https://repo.litespeed.sh | bash
 apt update
 apt install -y openlitespeed
 systemctl enable lsws 2>/dev/null || systemctl enable lshttpd 2>/dev/null || echo "AVISO: no se pudo 'enable' OpenLiteSpeed para autoarranque (no crítico, se sigue iniciando/reiniciando bien con systemctl start|restart lsws). Revísalo luego con: systemctl status lsws"
 
-echo "== Paso 3/11: MariaDB 11.4 LTS =="
+echo "== Paso 3/13: MariaDB 11.4 LTS =="
 curl -LsS https://downloads.mariadb.com/MariaDB/mariadb_repo_setup | bash -s -- --mariadb-server-version="mariadb-11.4"
 apt update
 apt install -y mariadb-server mariadb-client
@@ -100,7 +102,7 @@ GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';
 FLUSH PRIVILEGES;
 SQL
 
-echo "== Paso 4/11: PHP 8.4 (LSPHP) =="
+echo "== Paso 4/13: PHP 8.4 (LSPHP) =="
 apt install -y lsphp84 lsphp84-common lsphp84-mysql
 
 for ext in curl json zip gd mbstring xml intl imagick opcache; do
@@ -141,7 +143,7 @@ set_php_ini max_execution_time 300 "$PHP_INI"
 set_php_ini max_input_vars 3000 "$PHP_INI"
 set_php_ini max_input_time 300 "$PHP_INI"
 
-echo "== Paso 5/11: panel de administración OLS =="
+echo "== Paso 5/13: panel de administración OLS =="
 # NOTA: admpass.sh es interactivo por diseño. Lo automatizamos con `expect`.
 # Si LiteSpeed cambia el texto de sus prompts esto puede fallar — si pasa,
 # entra por SSH y corre admpass.sh a mano una vez.
@@ -156,7 +158,7 @@ send "$OLS_PASS\r"
 expect eof
 EOF
 
-echo "== Paso 6/11: Virtual Host para $DOMAIN_NAME =="
+echo "== Paso 6/13: Virtual Host para $DOMAIN_NAME =="
 mkdir -p /usr/local/lsws/$VH_NAME/public_html
 mkdir -p /usr/local/lsws/conf/vhosts/$VH_NAME
 
@@ -231,7 +233,7 @@ fi
 chown -R nobody:nogroup /usr/local/lsws/$VH_NAME/public_html
 systemctl restart lsws
 
-echo "== Paso 7/11: WP-CLI + WordPress =="
+echo "== Paso 7/13: WP-CLI + WordPress =="
 curl -sO https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
 chmod +x wp-cli.phar
 mv wp-cli.phar /usr/local/bin/wp-cli.phar
@@ -260,14 +262,14 @@ else
 fi
 sudo -u nobody /usr/bin/php /usr/local/bin/wp-cli.phar plugin install litespeed-cache --activate
 
-echo "== Paso 8/11: firewall (ufw) =="
+echo "== Paso 8/13: firewall (ufw) =="
 ufw allow 22/tcp
 ufw allow 80/tcp
 ufw allow 443/tcp
 ufw allow 7080/tcp
 ufw --force enable
 
-echo "== Paso 9/11: DNS automático en Route 53 (si se dio Hosted Zone) =="
+echo "== Paso 9/13: DNS automático en Route 53 (si se dio Hosted Zone) =="
 if [ -n "$HOSTED_ZONE_ID" ]; then
   cat > /tmp/dns-change.json <<JSON
 {
@@ -281,42 +283,190 @@ JSON
     || echo "AVISO: falló el cambio de DNS automático — revisa los permisos IAM del rol de la instancia"
 fi
 
-echo "== Paso 10/11: SSL (Let's Encrypt, con reintento hasta que el DNS resuelva) =="
+echo "== Paso 10/13: SSL (Let's Encrypt, con reintento acotado hasta que el DNS resuelva) =="
 apt install -y snapd
 snap install core; snap refresh core
 snap install --classic certbot
 ln -sf /snap/bin/certbot /usr/bin/certbot
 
+# --- Hooks de renovacion ---------------------------------------------------
+# certbot emite y renueva en modo --standalone, que necesita el puerto 80 LIBRE.
+# OpenLiteSpeed lo ocupa. La emision inicial funciona porque get-ssl.sh para OLS
+# a mano, pero la RENOVACION automatica (timer de snap, a los ~60 dias) corre
+# sin ese contexto: encuentra el puerto ocupado, falla, y el sitio se queda sin
+# SSL sin que nadie se entere. Estos hooks viven en renewal-hooks/ y aplican a
+# toda renovacion futura, sin depender de flags que haya que recordar.
+mkdir -p /etc/letsencrypt/renewal-hooks/pre /etc/letsencrypt/renewal-hooks/post
+
+cat > /etc/letsencrypt/renewal-hooks/pre/10-stop-lsws.sh <<'PREHOOK'
+#!/bin/bash
+# Libera el puerto 80 para que certbot --standalone pueda validar.
+systemctl stop lsws || true
+PREHOOK
+
+cat > /etc/letsencrypt/renewal-hooks/post/10-start-lsws.sh <<'POSTHOOK'
+#!/bin/bash
+# Corre SIEMPRE, haya renovado bien o mal, para no dejar el sitio caido.
+systemctl start lsws || systemctl restart lsws || true
+POSTHOOK
+
+chmod +x /etc/letsencrypt/renewal-hooks/pre/10-stop-lsws.sh \
+         /etc/letsencrypt/renewal-hooks/post/10-start-lsws.sh
+echo "Hooks de renovacion instalados en /etc/letsencrypt/renewal-hooks/"
+
 cat > /usr/local/bin/get-ssl.sh <<SSLSCRIPT
 #!/bin/bash
-if [ -d "/etc/letsencrypt/live/$DOMAIN_NAME" ]; then exit 0; fi
-RESOLVED=\$(dig +short $DOMAIN_NAME @8.8.8.8 | tail -1)
-if [ "\$RESOLVED" != "$PUBLIC_IP" ]; then
-  echo "\$(date): DNS aún no resuelve a $PUBLIC_IP (resuelve a '\$RESOLVED'). Reintentando en 15 min."
+# Emite el certificado en cuanto el DNS del cliente apunte a esta IP.
+# Se rinde tras MAX_TRIES intentos para no dejar un cron golpeando a
+# Let's Encrypt para siempre si el dominio nunca se apunta.
+DOMAIN="$DOMAIN_NAME"
+IP="$PUBLIC_IP"
+EMAIL="$ADMIN_EMAIL"
+VH="$VH_NAME"
+COUNTER=/var/lib/wp-ssl-attempts
+GIVEUP=/var/lib/wp-ssl-giveup
+MAX_TRIES=192   # 192 x 15 min = 48 horas
+
+if [ -d "/etc/letsencrypt/live/\$DOMAIN" ]; then exit 0; fi
+if [ -f "\$GIVEUP" ]; then exit 0; fi
+
+N=\$(cat "\$COUNTER" 2>/dev/null || echo 0)
+N=\$((N + 1))
+echo "\$N" > "\$COUNTER"
+
+if [ "\$N" -gt "\$MAX_TRIES" ]; then
+  echo "\$(date): 48h de intentos y \$DOMAIN nunca apunto a \$IP. Me detengo."
+  echo "  -> Corrige el registro A del dominio y luego ejecuta en el servidor:"
+  echo "     rm -f \$GIVEUP \$COUNTER && /usr/local/bin/get-ssl.sh"
+  touch "\$GIVEUP"
   exit 0
 fi
+
+RESOLVED=\$(dig +short A "\$DOMAIN" @8.8.8.8 | tail -1)
+if [ "\$RESOLVED" != "\$IP" ]; then
+  echo "\$(date): intento \$N/\$MAX_TRIES — \$DOMAIN resuelve a '\$RESOLVED', no a \$IP. Espero."
+  exit 0
+fi
+
+# ¿El cliente creo tambien el registro de www? Si no existe, pedir el
+# certificado con -d www.\$DOMAIN hace fallar la emision COMPLETA y deja al
+# dominio raiz sin SSL tambien. Por eso www es opcional aqui.
+WWW_RESOLVED=\$(dig +short A "www.\$DOMAIN" @8.8.8.8 | tail -1)
+if [ "\$WWW_RESOLVED" = "\$IP" ]; then
+  DOMAIN_ARGS="-d \$DOMAIN -d www.\$DOMAIN"
+else
+  echo "\$(date): www.\$DOMAIN no apunta aqui (resuelve a '\$WWW_RESOLVED'); emito solo para \$DOMAIN."
+  DOMAIN_ARGS="-d \$DOMAIN"
+fi
+
 systemctl stop lsws
-certbot certonly --standalone -d $DOMAIN_NAME -d www.$DOMAIN_NAME --non-interactive --agree-tos -m $ADMIN_EMAIL
+certbot certonly --standalone \$DOMAIN_ARGS --non-interactive --agree-tos \\
+  -m "\$EMAIL" --keep-until-expiring
+CERT_OK=\$?
 systemctl start lsws
+
+if [ "\$CERT_OK" -ne 0 ] || [ ! -d "/etc/letsencrypt/live/\$DOMAIN" ]; then
+  echo "\$(date): certbot fallo (codigo \$CERT_OK). El cron reintenta en 15 min."
+  exit 0
+fi
+
 if ! grep -q "listener SSL" /usr/local/lsws/conf/httpd_config.conf; then
 cat >> /usr/local/lsws/conf/httpd_config.conf <<SSLCONF
 
 listener SSL {
   address                 *:443
   secure                  1
-  keyFile                 /etc/letsencrypt/live/$DOMAIN_NAME/privkey.pem
-  certFile                /etc/letsencrypt/live/$DOMAIN_NAME/fullchain.pem
-  map                     $VH_NAME $DOMAIN_NAME, www.$DOMAIN_NAME
+  keyFile                 /etc/letsencrypt/live/\$DOMAIN/privkey.pem
+  certFile                /etc/letsencrypt/live/\$DOMAIN/fullchain.pem
+  map                     \$VH \$DOMAIN, www.\$DOMAIN
 }
 SSLCONF
 systemctl restart lsws
 fi
+echo "\$(date): SSL activo para \$DOMAIN."
 SSLSCRIPT
 chmod +x /usr/local/bin/get-ssl.sh
-(crontab -l 2>/dev/null; echo "*/15 * * * * /usr/local/bin/get-ssl.sh >> /var/log/get-ssl.log 2>&1") | crontab -
-/usr/local/bin/get-ssl.sh || echo "Primer intento de SSL no completado, el cron reintentará solo."
+# grep -v evita duplicar la linea si el script se re-ejecuta en la misma maquina
+(crontab -l 2>/dev/null | grep -v get-ssl.sh; echo "*/15 * * * * /usr/local/bin/get-ssl.sh >> /var/log/get-ssl.log 2>&1") | crontab -
+/usr/local/bin/get-ssl.sh || echo "Primer intento de SSL no completado, el cron reintentara solo."
 
-echo "== Paso 11/11: credenciales en AWS Secrets Manager =="
+echo "== Paso 11/13: respaldos automaticos (base de datos + archivos) =="
+mkdir -p /var/backups/wordpress
+chown nobody:nogroup /var/backups/wordpress
+chmod 750 /var/backups/wordpress
+
+cat > /usr/local/bin/wp-backup.sh <<BACKUPSCRIPT
+#!/bin/bash
+# Respaldo: volcado de la base de datos + wp-content + wp-config.php.
+# Queda en /var/backups/wordpress (ultimas 3 copias) y, si hay bucket
+# configurado, sube a S3 (alli la retencion la maneja la regla de ciclo de
+# vida del bucket: 30 dias).
+set -uo pipefail
+DOMAIN="$DOMAIN_NAME"
+DOCROOT="/usr/local/lsws/$VH_NAME/public_html"
+BUCKET="$BACKUP_BUCKET"
+REGION="$AWS_REGION"
+DEST=/var/backups/wordpress
+STAMP=\$(date +%Y%m%d-%H%M%S)
+
+echo "=== Respaldo \$STAMP de \$DOMAIN ==="
+cd "\$DOCROOT" || { echo "ERROR: no existe \$DOCROOT"; exit 1; }
+
+sudo -u nobody /usr/bin/php /usr/local/bin/wp-cli.phar db export "\$DEST/db-\$STAMP.sql" --add-drop-table \\
+  || { echo "ERROR: fallo el volcado de la base de datos"; exit 1; }
+gzip -f "\$DEST/db-\$STAMP.sql"
+
+tar -czf "\$DEST/files-\$STAMP.tar.gz" -C "\$DOCROOT" wp-content wp-config.php \\
+  || { echo "ERROR: fallo el empaquetado de archivos"; exit 1; }
+
+if [ -n "\$BUCKET" ]; then
+  aws s3 cp "\$DEST/db-\$STAMP.sql.gz"    "s3://\$BUCKET/\$DOMAIN/\$STAMP/" --region "\$REGION" \\
+    || echo "AVISO: no se pudo subir la base de datos a S3"
+  aws s3 cp "\$DEST/files-\$STAMP.tar.gz" "s3://\$BUCKET/\$DOMAIN/\$STAMP/" --region "\$REGION" \\
+    || echo "AVISO: no se pudieron subir los archivos a S3"
+else
+  echo "AVISO: sin bucket S3 configurado — la copia queda SOLO en este disco."
+fi
+
+# Conserva las 3 copias locales mas recientes de cada tipo
+ls -1t "\$DEST"/db-*.sql.gz    2>/dev/null | tail -n +4 | xargs -r rm -f
+ls -1t "\$DEST"/files-*.tar.gz 2>/dev/null | tail -n +4 | xargs -r rm -f
+
+echo "=== Respaldo \$STAMP terminado ==="
+BACKUPSCRIPT
+chmod +x /usr/local/bin/wp-backup.sh
+
+# 07:15 UTC = 02:15 en Peru (UTC-5), fuera de hora pico
+(crontab -l 2>/dev/null | grep -v wp-backup.sh; echo "15 7 * * * /usr/local/bin/wp-backup.sh >> /var/log/wp-backup.log 2>&1") | crontab -
+
+# Un respaldo de prueba ahora mismo: si algo esta mal (permisos, IAM del
+# bucket), es mejor enterarse aqui que dentro de 3 semanas cuando haga falta.
+/usr/local/bin/wp-backup.sh >> /var/log/wp-backup.log 2>&1 \
+  && echo "Respaldo de prueba OK (ver /var/log/wp-backup.log)" \
+  || echo "AVISO: el respaldo de prueba fallo — revisa /var/log/wp-backup.log"
+
+echo "== Paso 12/13: verificacion final (health check) =="
+HEALTH_URL="https://$DOMAIN_NAME"
+HEALTH_OK="no"
+for i in 1 2 3; do
+  CODE=$(curl -s -o /dev/null -w "%{http_code}" -L --max-time 20 "$HEALTH_URL" || echo "000")
+  if [ "$CODE" = "200" ]; then HEALTH_OK="si"; break; fi
+  echo "Health check intento $i/3: HTTP $CODE"
+  sleep 10
+done
+if [ "$HEALTH_OK" = "si" ]; then
+  echo "HEALTH CHECK OK — $HEALTH_URL responde 200."
+else
+  # Aun sin SSL el sitio puede estar bien: si el DNS no ha propagado todavia,
+  # el cron de SSL lo resolvera solo en cuanto apunte.
+  CODE_IP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 20 "http://$PUBLIC_IP" || echo "000")
+  echo "HEALTH CHECK PENDIENTE — $HEALTH_URL no respondio 200 todavia (HTTP $CODE)."
+  echo "  Servidor por IP directa: HTTP $CODE_IP (200 = el servidor esta bien, falta el DNS/SSL)"
+  echo "  Revisa: dig +short A $DOMAIN_NAME  ->  debe dar $PUBLIC_IP"
+  echo "  Progreso del SSL: tail -f /var/log/get-ssl.log"
+fi
+
+echo "== Paso 13/13: credenciales en AWS Secrets Manager =="
 SECRET_JSON=$(jq -n \
   --arg olsu "$OLS_USER" --arg olsp "$OLS_PASS" \
   --arg dbrp "$DB_ROOT_PASS" --arg dbu "$DB_USER" --arg dbp "$DB_PASS" \
@@ -332,3 +482,5 @@ echo "=== Bootstrap terminado: $(date) ==="
 echo "Sitio:        https://$DOMAIN_NAME"
 echo "Panel OLS:    https://$PUBLIC_IP:7080  (usuario: $OLS_USER)"
 echo "Credenciales: Secrets Manager -> $SECRET_NAME (region $AWS_REGION)"
+echo "Respaldos:    diarios 07:15 UTC -> /var/backups/wordpress + s3://${BACKUP_BUCKET:-(sin bucket)}"
+echo "Health check: $HEALTH_OK  (si=el sitio ya responde 200 por HTTPS)"
