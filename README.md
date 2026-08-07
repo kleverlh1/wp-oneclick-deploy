@@ -82,7 +82,73 @@ Recomendación: lanza el stack una vez tú mismo con un dominio de prueba,
 revisa `/var/log/wp-bootstrap.log` de principio a fin, y ajusta lo que haga
 falta en `bootstrap.sh` antes de ofrecérselo a un cliente.
 
-## 5. Ideas para una v2 (cuando esto ya esté probado y quieras escalarlo)
+## 5. Respaldos y restauración
+
+El stack crea un bucket S3 propio (aparece en los Outputs como `BackupBucket`)
+y el servidor corre `/usr/local/bin/wp-backup.sh` todos los días a las **07:15
+UTC** (02:15 en Perú). Cada corrida guarda dos archivos:
+
+- `db-FECHA.sql.gz` — volcado completo de la base de datos
+- `files-FECHA.tar.gz` — `wp-content` + `wp-config.php`
+
+Quedan en `/var/backups/wordpress` (las 3 copias más recientes) y en
+`s3://BUCKET/DOMINIO/FECHA/`. En S3 se borran solos a los 30 días
+(`BackupRetentionDays` en el template). El bucket tiene `DeletionPolicy:
+Retain`: si borras el stack, los respaldos siguen ahí.
+
+Log: `/var/log/wp-backup.log`. Para forzar un respaldo ahora:
+`sudo /usr/local/bin/wp-backup.sh`
+
+### Cómo restaurar (pruébalo una vez ANTES de necesitarlo)
+
+Un respaldo que nunca restauraste no es un respaldo. Por SSH en el servidor:
+
+```bash
+DOM=tiendasplanet.com
+BUCKET=<el que sale en el Output BackupBucket>
+FECHA=20260806-071500          # aws s3 ls s3://$BUCKET/$DOM/ para ver cuáles hay
+
+cd /tmp
+aws s3 cp s3://$BUCKET/$DOM/$FECHA/db-$FECHA.sql.gz .
+aws s3 cp s3://$BUCKET/$DOM/$FECHA/files-$FECHA.tar.gz .
+gunzip -f db-$FECHA.sql.gz
+
+DOCROOT=/usr/local/lsws/$(echo $DOM | tr '.' '-')/public_html
+cd $DOCROOT
+sudo -u nobody /usr/bin/php /usr/local/bin/wp-cli.phar db import /tmp/db-$FECHA.sql
+sudo tar -xzf /tmp/files-$FECHA.tar.gz -C $DOCROOT
+sudo chown -R nobody:nogroup $DOCROOT
+sudo systemctl restart lsws
+```
+
+## 6. Renovación del certificado SSL
+
+`certbot` emite y renueva en modo `--standalone`, que necesita el **puerto 80
+libre** — y OpenLiteSpeed lo ocupa. Por eso el script instala dos hooks:
+
+```
+/etc/letsencrypt/renewal-hooks/pre/10-stop-lsws.sh    → detiene OLS
+/etc/letsencrypt/renewal-hooks/post/10-start-lsws.sh  → lo vuelve a levantar
+```
+
+El `post` corre siempre, haya renovado o no, para no dejar el sitio caído.
+Sin estos hooks la renovación falla en silencio a los ~60 días y el sitio se
+queda sin SSL. Para comprobarlo en cualquier momento:
+
+```bash
+sudo certbot renew --dry-run     # la prueba real: detiene OLS unos segundos
+sudo certbot certificates        # fecha de vencimiento actual
+```
+
+**Servidores ya desplegados con una versión anterior del script** (como
+tiendasplanet.com) no tienen los hooks. Se les aplica con:
+
+```bash
+sudo DOMAIN_NAME="tiendasplanet.com" BACKUP_BUCKET="" \
+  bash scripts/hotfix-servidor-existente.sh
+```
+
+## 7. Ideas para una v2 (cuando esto ya esté probado y quieras escalarlo)
 
 - **AMI pre-construida con Packer**: instalar OLS/MariaDB/PHP una sola vez en
   una imagen dorada, para que el arranque de cada cliente tome ~1 minuto en
@@ -98,10 +164,11 @@ falta en `bootstrap.sh` antes de ofrecérselo a un cliente.
 ## Archivos
 
 ```
-tiendasplanet-deploy/
+wp-oneclick-deploy/
 ├── README.md
 ├── cloudformation/
-│   └── wordpress-stack.yaml   ← lo que lanza el botón "Launch Stack"
+│   └── wordpress-stack.yaml          ← lo que lanza el botón "Launch Stack"
 └── scripts/
-    └── bootstrap.sh           ← toda la lógica de instalación (fuente única)
+    ├── bootstrap.sh                  ← toda la lógica de instalación (fuente única)
+    └── hotfix-servidor-existente.sh  ← aplica SSL+respaldos a servidores ya desplegados
 ```
