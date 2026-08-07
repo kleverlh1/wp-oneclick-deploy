@@ -109,21 +109,50 @@ for ext in curl json zip gd mbstring xml intl imagick opcache; do
   apt install -y lsphp84-$ext || echo "AVISO: el paquete lsphp84-$ext no existe en el repo, se omite (posiblemente ya viene incluido en el paquete base)"
 done
 
-echo "== Activando extensiones PHP instaladas (los paquetes lsphp84 no las habilitan solos) =="
+echo "== Activando extensiones PHP que no vengan ya habilitadas =="
+# OJO: el paquete base lsphp84 YA trae varias extensiones habilitadas via
+# mods-available/ (mysqli, pdo_mysql, curl, intl, imagick, opcache). Si ademas
+# las declaramos en php.ini, PHP arranca quejandose en cada peticion:
+#   PHP Warning: Module "curl" is already loaded in Unknown on line 0
+#   Cannot load Zend OPcache - it was already loaded
+# Funciona igual, pero ensucia el log de errores y confunde al diagnosticar.
+# Por eso aqui solo se agrega lo que NO este ya habilitado.
 PHP_INI="/usr/local/lsws/lsphp84/etc/php/8.4/litespeed/php.ini"
+PHP_ETC=$(dirname "$PHP_INI")/..
+MODS_DIR="$PHP_ETC/mods-available"
 EXT_DIR=$(find /usr/local/lsws/lsphp84/lib/php -maxdepth 1 -type d -name "2*" | head -1)
+
+ya_habilitada() {
+  # true si el paquete base ya la activa (archivo .ini en mods-available)
+  local mod="$1"
+  ls "$MODS_DIR"/*"${mod}".ini >/dev/null 2>&1
+}
+
 if [ -n "$EXT_DIR" ]; then
   for mod in mysqli pdo_mysql curl gd mbstring xml zip intl imagick; do
-    if [ -f "$EXT_DIR/${mod}.so" ] && ! grep -q "^extension=${mod}\.so" "$PHP_INI"; then
+    if ya_habilitada "$mod"; then
+      echo "  $mod: ya viene habilitada por el paquete base, no se toca."
+    elif [ -f "$EXT_DIR/${mod}.so" ] && ! grep -q "^extension=${mod}\.so" "$PHP_INI"; then
+      echo "  $mod: se activa en php.ini."
       echo "extension=${mod}.so" >> "$PHP_INI"
     fi
   done
-  if [ -f "$EXT_DIR/opcache.so" ] && ! grep -qi "opcache.so" "$PHP_INI"; then
+  if ya_habilitada opcache; then
+    echo "  opcache: ya viene habilitado por el paquete base, no se toca."
+  elif [ -f "$EXT_DIR/opcache.so" ] && ! grep -qi "opcache.so" "$PHP_INI"; then
     echo "zend_extension=opcache.so" >> "$PHP_INI"
   fi
 fi
-echo "Módulos PHP activos ahora:"
-/usr/local/lsws/lsphp84/bin/lsphp -i 2>/dev/null | grep -iE "^mysqli support|^pdo_mysql support|^curl support|^gd support|^mbstring support|^xml support|^zip |^intl support|^imagick module version|opcache.enable " || echo "AVISO: no se pudo confirmar por -i, revisar a mano con: lsphp -i | less"
+echo "Verificando modulos PHP realmente cargados:"
+# Nota: lsphp NO acepta -m; hay que preguntarle a PHP desde un script.
+PHP_MODS=$(/usr/local/lsws/lsphp84/bin/lsphp -r 'echo implode(" ", get_loaded_extensions());' 2>/dev/null)
+echo "  $PHP_MODS"
+for req in mysqli curl gd mbstring xml zip intl imagick; do
+  case " $PHP_MODS " in
+    *" $req "*) : ;;
+    *) echo "  AVISO: la extension '$req' NO esta cargada — algunos plugins de WordPress la necesitan." ;;
+  esac
+done
 
 echo "== Ajustando límites de PHP (memoria, subida de archivos, tiempos) =="
 set_php_ini() {
