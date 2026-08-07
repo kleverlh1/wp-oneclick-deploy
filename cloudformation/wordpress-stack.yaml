@@ -52,6 +52,23 @@ Parameters:
       antes de darle este boton a un cliente: si apunta a 'main', un cliente que lance el
       stack mientras editas el repo desplegaria una version a medias.
 
+  BootstrapSha256:
+    Type: String
+    Default: ""
+    AllowedPattern: "^([a-f0-9]{64})?$"
+    Description: >
+      Checksum SHA256 del bootstrap.sh. Lo rellena publish.sh al publicar en S3.
+      Si queda vacio no se verifica (modo GitHub raw, comportamiento anterior).
+
+  CertbotStaging:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      true = usar el servidor de PRUEBAS de Let's Encrypt. El certificado no sera
+      valido en navegadores, pero no consume el limite de 5 certificados por semana
+      por dominio. Ponlo en true mientras pruebas la plantilla.
+
   BackupRetentionDays:
     Type: Number
     Default: 30
@@ -176,7 +193,23 @@ Resources:
           export HOSTED_ZONE_ID="${HostedZoneId}"
           export AWS_REGION="${AWS::Region}"
           export BACKUP_BUCKET="${WPBackupBucket}"
-          curl -fsSL "${BootstrapScriptUrl}" -o /tmp/bootstrap.sh
+          export CERTBOT_STAGING="${CertbotStaging}"
+
+          # Reintentos: en el primer minuto de vida la red a veces no esta lista.
+          for intento in 1 2 3 4 5; do
+            curl -fsSL --retry 3 --retry-delay 5 "${BootstrapScriptUrl}" -o /tmp/bootstrap.sh && break
+            echo "descarga fallida (intento $intento), reintento en 10s"
+            sleep 10
+          done
+          test -s /tmp/bootstrap.sh || { echo "FATAL: no pude descargar bootstrap.sh"; exit 1; }
+
+          # Si viene de S3 con checksum, un archivo cortado o alterado aborta aqui
+          # en vez de romper a mitad de la instalacion.
+          if [ -n "${BootstrapSha256}" ]; then
+            echo "${BootstrapSha256}  /tmp/bootstrap.sh" | sha256sum -c - \
+              || { echo "FATAL: checksum de bootstrap.sh no coincide"; exit 1; }
+          fi
+
           chmod +x /tmp/bootstrap.sh
           /tmp/bootstrap.sh
 
