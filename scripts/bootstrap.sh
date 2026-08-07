@@ -144,8 +144,11 @@ if [ -n "$EXT_DIR" ]; then
   fi
 fi
 echo "Verificando modulos PHP realmente cargados:"
-# Nota: lsphp NO acepta -m; hay que preguntarle a PHP desde un script.
-PHP_MODS=$(/usr/local/lsws/lsphp84/bin/lsphp -r 'echo implode(" ", get_loaded_extensions());' 2>/dev/null)
+# Nota: lsphp NO acepta -m ni -r (esos son de php-cli). Solo entra en modo
+# interprete si le pasas un ARCHIVO, asi que preguntamos con uno temporal.
+echo '<?php echo implode(" ", get_loaded_extensions());' > /tmp/php-mods.php
+PHP_MODS=$(/usr/local/lsws/lsphp84/bin/lsphp /tmp/php-mods.php 2>/dev/null)
+rm -f /tmp/php-mods.php
 echo "  $PHP_MODS"
 for req in mysqli curl gd mbstring xml zip intl imagick; do
   case " $PHP_MODS " in
