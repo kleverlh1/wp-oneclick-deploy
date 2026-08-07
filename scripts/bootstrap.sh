@@ -346,6 +346,17 @@ chmod +x /etc/letsencrypt/renewal-hooks/pre/10-stop-lsws.sh \
          /etc/letsencrypt/renewal-hooks/post/10-start-lsws.sh
 echo "Hooks de renovacion instalados en /etc/letsencrypt/renewal-hooks/"
 
+# Modo pruebas: el servidor de staging de Let's Encrypt no gasta el limite de
+# 5 certificados por semana por dominio. El cert resultante NO es valido en
+# navegadores — es a proposito.
+CERTBOT_STAGING="${CERTBOT_STAGING:-false}"
+if [ "$CERTBOT_STAGING" = "true" ]; then
+  CERTBOT_STAGING_ARG="--staging --break-my-certs"
+  echo "AVISO: certificado en MODO STAGING (no valido en navegadores, no gasta cupo)."
+else
+  CERTBOT_STAGING_ARG=""
+fi
+
 cat > /usr/local/bin/get-ssl.sh <<SSLSCRIPT
 #!/bin/bash
 # Emite el certificado en cuanto el DNS del cliente apunte a esta IP.
@@ -393,6 +404,7 @@ fi
 
 systemctl stop lsws
 certbot certonly --standalone \$DOMAIN_ARGS --non-interactive --agree-tos \\
+  --cert-name "\$DOMAIN" ${CERTBOT_STAGING_ARG} \\
   -m "\$EMAIL" --keep-until-expiring
 CERT_OK=\$?
 systemctl start lsws
