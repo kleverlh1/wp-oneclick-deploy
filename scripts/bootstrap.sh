@@ -483,7 +483,9 @@ BACKUPSCRIPT
 chmod +x /usr/local/bin/wp-backup.sh
 
 # 07:15 UTC = 02:15 en Peru (UTC-5), fuera de hora pico
-(crontab -l 2>/dev/null | grep -v wp-backup.sh; echo "15 7 * * * /usr/local/bin/wp-backup.sh >> /var/log/wp-backup.log 2>&1") | crontab -
+{ crontab -l 2>/dev/null || true; } | grep -v wp-backup.sh > /tmp/cron.tmp || true
+echo "15 7 * * * /usr/local/bin/wp-backup.sh >> /var/log/wp-backup.log 2>&1" >> /tmp/cron.tmp
+crontab /tmp/cron.tmp && rm -f /tmp/cron.tmp
 
 # Un respaldo de prueba ahora mismo: si algo esta mal (permisos, IAM del
 # bucket), es mejor enterarse aqui que dentro de 3 semanas cuando haga falta.
