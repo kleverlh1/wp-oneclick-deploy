@@ -1,0 +1,32 @@
+name: Publicar a S3
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'cloudformation/**'
+      - 'scripts/bootstrap.sh'
+      - 'scripts/publish.sh'
+      - '.github/workflows/publish.yml'
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  id-token: write      # necesario para pedir el token OIDC
+  contents: read
+
+jobs:
+  publicar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # trae los tags, para que publish.sh los vea
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::968638548210:role/wp-oneclick-publisher
+          aws-region: us-east-1
+
+      - name: Publicar
+        run: bash scripts/publish.sh
