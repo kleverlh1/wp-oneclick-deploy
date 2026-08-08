@@ -431,7 +431,9 @@ echo "\$(date): SSL activo para \$DOMAIN."
 SSLSCRIPT
 chmod +x /usr/local/bin/get-ssl.sh
 # grep -v evita duplicar la linea si el script se re-ejecuta en la misma maquina
-(crontab -l 2>/dev/null | grep -v get-ssl.sh; echo "*/15 * * * * /usr/local/bin/get-ssl.sh >> /var/log/get-ssl.log 2>&1") | crontab -
+{ crontab -l 2>/dev/null || true; } | grep -v get-ssl.sh > /tmp/cron.tmp || true
+echo "*/15 * * * * /usr/local/bin/get-ssl.sh >> /var/log/get-ssl.log 2>&1" >> /tmp/cron.tmp
+crontab /tmp/cron.tmp && rm -f /tmp/cron.tmp
 /usr/local/bin/get-ssl.sh || echo "Primer intento de SSL no completado, el cron reintentara solo."
 
 echo "== Paso 11/13: respaldos automaticos (base de datos + archivos) =="
