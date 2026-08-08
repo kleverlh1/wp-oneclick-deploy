@@ -194,6 +194,10 @@ Resources:
           export AWS_REGION="${AWS::Region}"
           export BACKUP_BUCKET="${WPBackupBucket}"
           export CERTBOT_STAGING="${CertbotStaging}"
+          # IP definitiva (la elastica). Sin esto el script lee la IP automatica
+          # del arranque, escribe ESA en Route 53, y el dominio queda apuntando
+          # a una IP que desaparece en cuanto se asocia la elastica.
+          export PUBLIC_IP="${ElasticIP}"
 
           # Reintentos: en el primer minuto de vida la red a veces no esta lista.
           for intento in 1 2 3 4 5; do
@@ -217,6 +221,11 @@ Resources:
     Type: AWS::EC2::EIP
     Properties:
       Domain: vpc
+
+  ElasticIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt ElasticIP.AllocationId
       InstanceId: !Ref WPInstance
 
 Outputs:
