@@ -27,7 +27,9 @@ BACKUP_BUCKET="${BACKUP_BUCKET:-}"   # bucket S3 para respaldos; vacio = solo co
 
 # --- IP pública de la instancia vía metadata (IMDSv2) ---
 TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
-PUBLIC_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4)
+# Si CloudFormation nos paso la IP elastica, usamos esa: la IP de los metadatos
+# es la automatica del arranque, que la EIP reemplaza segundos despues.
+PUBLIC_IP="${PUBLIC_IP:-$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4)}"
 echo "IP pública detectada: $PUBLIC_IP"
 
 DB_NAME=$(echo "$DOMAIN_NAME" | tr '.' '_')
@@ -262,8 +264,16 @@ else
   echo "El mapeo del dominio ya existía, no se duplica."
 fi
 
+# El listener "Default" de OLS viene en el puerto 8088 de fabrica. Sin esto el
+# sitio no responde por HTTP y certbot no puede validar (nadie escucha en el 80).
+sed -i '/^listener Default/,/^}/ s/address .*:8088/address                 *:80/' /usr/local/lsws/conf/httpd_config.conf
+
+# El vhost de ejemplo trae 'map Example *' — un comodin que captura todos los
+# dominios y gana por orden, dejando el mapeo real sin efecto.
+sed -i '/^listener Default/,/^}/ { /map  *Example \*/d }' /usr/local/lsws/conf/httpd_config.conf
+
 chown -R nobody:nogroup /usr/local/lsws/$VH_NAME/public_html
-systemctl restart lsws
+systemctl restart lshttpd
 
 echo "== Paso 7/13: WP-CLI + WordPress =="
 curl -sO https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
@@ -333,13 +343,13 @@ mkdir -p /etc/letsencrypt/renewal-hooks/pre /etc/letsencrypt/renewal-hooks/post
 cat > /etc/letsencrypt/renewal-hooks/pre/10-stop-lsws.sh <<'PREHOOK'
 #!/bin/bash
 # Libera el puerto 80 para que certbot --standalone pueda validar.
-systemctl stop lsws || true
+systemctl stop lshttpd || true
 PREHOOK
 
 cat > /etc/letsencrypt/renewal-hooks/post/10-start-lsws.sh <<'POSTHOOK'
 #!/bin/bash
 # Corre SIEMPRE, haya renovado bien o mal, para no dejar el sitio caido.
-systemctl start lsws || systemctl restart lsws || true
+systemctl start lshttpd || systemctl restart lshttpd || true
 POSTHOOK
 
 chmod +x /etc/letsencrypt/renewal-hooks/pre/10-stop-lsws.sh \
@@ -402,12 +412,12 @@ else
   DOMAIN_ARGS="-d \$DOMAIN"
 fi
 
-systemctl stop lsws
+systemctl stop lshttpd
 certbot certonly --standalone \$DOMAIN_ARGS --non-interactive --agree-tos \\
   --cert-name "\$DOMAIN" ${CERTBOT_STAGING_ARG} \\
   -m "\$EMAIL" --keep-until-expiring
 CERT_OK=\$?
-systemctl start lsws
+systemctl start lshttpd
 
 if [ "\$CERT_OK" -ne 0 ] || [ ! -d "/etc/letsencrypt/live/\$DOMAIN" ]; then
   echo "\$(date): certbot fallo (codigo \$CERT_OK). El cron reintenta en 15 min."
@@ -425,7 +435,7 @@ listener SSL {
   map                     \$VH \$DOMAIN, www.\$DOMAIN
 }
 SSLCONF
-systemctl restart lsws
+systemctl restart lshttpd
 fi
 echo "\$(date): SSL activo para \$DOMAIN."
 SSLSCRIPT
