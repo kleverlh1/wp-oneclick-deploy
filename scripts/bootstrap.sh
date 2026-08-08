@@ -437,6 +437,34 @@ listener SSL {
 SSLCONF
 systemctl restart lshttpd
 fi
+
+# Redireccion HTTP -> HTTPS. Va AQUI y no en el paso 6 a proposito: si se
+# activara antes de tener certificado, el sitio mandaria al 443 donde no
+# escucha nadie y quedaria completamente inalcanzable. Al ponerla despues de
+# emitir, solo se activa cuando el HTTPS ya funciona de verdad.
+HTACCESS="/usr/local/lsws/\$VH/public_html/.htaccess"
+if ! grep -q "wp-oneclick-https-redirect" "\$HTACCESS" 2>/dev/null; then
+  cat > /tmp/redir.txt <<'HTA'
+# wp-oneclick-https-redirect
+<IfModule mod_rewrite.c>
+RewriteEngine On
+RewriteCond %{HTTPS} !=on
+RewriteRule ^(.*)$ https://%{HTTP_HOST}%{REQUEST_URI} [R=301,L]
+</IfModule>
+HTA
+  cat "\$HTACCESS" >> /tmp/redir.txt 2>/dev/null || true
+  mv /tmp/redir.txt "\$HTACCESS"
+  chown nobody:nogroup "\$HTACCESS"
+  echo "\$(date): redireccion HTTP -> HTTPS activada."
+fi
+
+# Sin esto WordPress sigue generando enlaces http:// en menus, imagenes y
+# canonicals — el candado se rompe por contenido mixto aunque el SSL este bien.
+cd "/usr/local/lsws/\$VH/public_html" 2>/dev/null && {
+  sudo -u nobody /usr/bin/php /usr/local/bin/wp-cli.phar option update home    "https://\$DOMAIN" >/dev/null 2>&1 || true
+  sudo -u nobody /usr/bin/php /usr/local/bin/wp-cli.phar option update siteurl "https://\$DOMAIN" >/dev/null 2>&1 || true
+}
+
 echo "\$(date): SSL activo para \$DOMAIN."
 SSLSCRIPT
 chmod +x /usr/local/bin/get-ssl.sh
