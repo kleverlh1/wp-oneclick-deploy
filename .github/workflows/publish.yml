@@ -23,17 +23,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Diagnostico OIDC
-        run: |
-          TOKEN=$(curl -sS \
-            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)
-          P=$(echo "$TOKEN" | cut -d. -f2)
-          P="$P$(printf '=%.0s' $(seq $(( (4 - ${#P} % 4) % 4 ))))"
-          echo "===== CLAIMS QUE ENVIA GITHUB ====="
-          echo "$P" | base64 -d | jq '{iss, aud, sub, repository, ref}'
-          echo "==================================="
-
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::968638548210:role/wp-oneclick-publisher
